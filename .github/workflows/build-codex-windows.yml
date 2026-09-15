@@ -59,8 +59,18 @@ jobs:
       - name: Prepare artifact
         shell: pwsh
         run: |
-          $release = "codex-rs\target\$env:TARGET\release"
+          $release = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release"
           $output = "codex-primary"
+
+          Write-Host "CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR"
+          Write-Host "Release directory = $release"
+
+          if (-not (Test-Path $release)) {
+            throw "Release directory does not exist: $release"
+          }
+
+          Get-ChildItem $release -Filter "*.exe" |
+            Select-Object Name, Length, LastWriteTime
 
           New-Item -ItemType Directory -Force -Path $output | Out-Null
 
@@ -119,8 +129,18 @@ jobs:
       - name: Prepare artifact
         shell: pwsh
         run: |
-          $release = "codex-rs\target\$env:TARGET\release"
+          $release = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release"
           $output = "codex-helpers"
+
+          Write-Host "CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR"
+          Write-Host "Release directory = $release"
+
+          if (-not (Test-Path $release)) {
+            throw "Release directory does not exist: $release"
+          }
+
+          Get-ChildItem $release -Filter "*.exe" |
+            Select-Object Name, Length, LastWriteTime
 
           New-Item -ItemType Directory -Force -Path $output | Out-Null
 
