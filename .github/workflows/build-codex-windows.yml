@@ -6,27 +6,63 @@ on:
 jobs:
   build:
     runs-on: windows-2025
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup CI
+        uses: ./.github/actions/setup-ci
+
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
         with:
+          toolchain: 1.95.0
           targets: x86_64-pc-windows-msvc
 
-      - name: Build codex
-        shell: pwsh
+      - name: Setup Rusty V8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Setup MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Build Codex
+        shell: bash
         working-directory: codex-rs
         run: |
-          cargo build `
-            --release `
-            --target x86_64-pc-windows-msvc `
-            --bin codex
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
 
-      - name: Upload codex.exe
+          cargo build \
+            --target x86_64-pc-windows-msvc \
+            --release \
+            --bin codex \
+            --bin codex-code-mode-host \
+            --bin codex-windows-sandbox-setup \
+            --bin codex-windows-sandbox-service \
+            --bin codex-command-runner
+
+      - name: Prepare output
+        shell: pwsh
+        run: |
+          $release = "codex-rs\target\x86_64-pc-windows-msvc\release"
+          $output = "codex-build"
+
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+
+          Copy-Item "$release\codex.exe" "$output\codex.exe"
+          Copy-Item "$release\codex-code-mode-host.exe" "$output\codex-code-mode-host.exe"
+          Copy-Item "$release\codex-windows-sandbox-setup.exe" "$output\codex-windows-sandbox-setup.exe"
+          Copy-Item "$release\codex-windows-sandbox-service.exe" "$output\codex-windows-sandbox-service.exe"
+          Copy-Item "$release\codex-command-runner.exe" "$output\codex-command-runner.exe"
+
+      - name: Upload Codex
         uses: actions/upload-artifact@v4
         with:
           name: codex-windows-x64
-          path: codex-rs/target/x86_64-pc-windows-msvc/release/codex.exe
+          path: codex-build
