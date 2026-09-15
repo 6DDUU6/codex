@@ -1,0 +1,32 @@
+name: Build Codex Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build codex
+        shell: pwsh
+        working-directory: codex-rs
+        run: |
+          cargo build `
+            --release `
+            --target x86_64-pc-windows-msvc `
+            --bin codex
+
+      - name: Upload codex.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-windows-x64
+          path: codex-rs/target/x86_64-pc-windows-msvc/release/codex.exe
