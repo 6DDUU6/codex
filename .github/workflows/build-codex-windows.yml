@@ -3,10 +3,20 @@ name: Build Codex Windows
 on:
   workflow_dispatch:
 
+env:
+  TARGET: x86_64-pc-windows-msvc
+
 jobs:
-  build:
+
+  # =========================================
+  # Primary binaries
+  # codex.exe
+  # codex-code-mode-host.exe
+  # =========================================
+  build-primary:
+    name: Build primary binaries
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -31,38 +41,138 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
 
-      - name: Build Codex
+      - name: Build primary binaries
         shell: bash
         working-directory: codex-rs
         run: |
+          set -euo pipefail
+
           export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
           export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
 
           cargo build \
-            --target x86_64-pc-windows-msvc \
+            --target "$TARGET" \
             --release \
             --bin codex \
-            --bin codex-code-mode-host \
-            --bin codex-windows-sandbox-setup \
-            --bin codex-windows-sandbox-service \
-            --bin codex-command-runner
+            --bin codex-code-mode-host
 
-      - name: Prepare output
+      - name: Prepare artifact
         shell: pwsh
         run: |
-          $release = "codex-rs\target\x86_64-pc-windows-msvc\release"
-          $output = "codex-build"
+          $release = "codex-rs\target\$env:TARGET\release"
+          $output = "codex-primary"
 
           New-Item -ItemType Directory -Force -Path $output | Out-Null
 
           Copy-Item "$release\codex.exe" "$output\codex.exe"
           Copy-Item "$release\codex-code-mode-host.exe" "$output\codex-code-mode-host.exe"
+
+      - name: Upload primary
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-primary
+          path: codex-primary
+
+
+  # =========================================
+  # Windows helpers
+  # =========================================
+  build-helpers:
+    name: Build Windows helpers
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CI
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Build helper binaries
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+
+          cargo build \
+            --target "$TARGET" \
+            --release \
+            --bin codex-windows-sandbox-setup \
+            --bin codex-windows-sandbox-service \
+            --bin codex-command-runner
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          $release = "codex-rs\target\$env:TARGET\release"
+          $output = "codex-helpers"
+
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+
           Copy-Item "$release\codex-windows-sandbox-setup.exe" "$output\codex-windows-sandbox-setup.exe"
           Copy-Item "$release\codex-windows-sandbox-service.exe" "$output\codex-windows-sandbox-service.exe"
           Copy-Item "$release\codex-command-runner.exe" "$output\codex-command-runner.exe"
 
-      - name: Upload Codex
+      - name: Upload helpers
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-helpers
+          path: codex-helpers
+
+
+  # =========================================
+  # Merge all binaries into one ZIP
+  # =========================================
+  package:
+    name: Package Codex
+    needs:
+      - build-primary
+      - build-helpers
+
+    runs-on: windows-2025
+
+    steps:
+      - name: Download primary
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-primary
+          path: codex
+
+      - name: Download helpers
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-helpers
+          path: codex
+
+      - name: Show files
+        shell: pwsh
+        run: |
+          Get-ChildItem codex | Format-Table Name, Length
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "codex\*" `
+            -DestinationPath "codex-windows-x64.zip"
+
+      - name: Upload final package
         uses: actions/upload-artifact@v4
         with:
           name: codex-windows-x64
-          path: codex-build
+          path: codex-windows-x64.zip
