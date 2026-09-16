@@ -109,7 +109,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if retry_state.retries < max_retries {
         retry_state.retries += 1;
         let retry_count = retry_state.retries;
-        let delay = Duration::from_secs(8);
+        let delay = Duration::from_secs(4);
         // let delay = err.retry_delay().unwrap_or_else(|| backoff(retry_count));
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
