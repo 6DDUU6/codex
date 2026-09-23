@@ -1,0 +1,198 @@
+name: Build Codex Windows
+
+on:
+  workflow_dispatch:
+
+env:
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+
+  # =========================================
+  # Primary binaries
+  # codex.exe
+  # codex-code-mode-host.exe
+  # =========================================
+  build-primary:
+    name: Build primary binaries
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CI
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Rusty V8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Setup MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Build primary binaries
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+
+          cargo build \
+            --target "$TARGET" \
+            --release \
+            --bin codex \
+            --bin codex-code-mode-host
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release"
+          $output = "codex-primary"
+
+          Write-Host "CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR"
+          Write-Host "Release directory = $release"
+
+          if (-not (Test-Path $release)) {
+            throw "Release directory does not exist: $release"
+          }
+
+          Get-ChildItem $release -Filter "*.exe" |
+            Select-Object Name, Length, LastWriteTime
+
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+
+          Copy-Item "$release\codex.exe" "$output\codex.exe"
+          Copy-Item "$release\codex-code-mode-host.exe" "$output\codex-code-mode-host.exe"
+
+      - name: Upload primary
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-primary
+          path: codex-primary
+
+
+  # =========================================
+  # Windows helpers
+  # =========================================
+  build-helpers:
+    name: Build Windows helpers
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup CI
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Build helper binaries
+        shell: bash
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+
+          cargo build \
+            --target "$TARGET" \
+            --release \
+            --bin codex-windows-sandbox-setup \
+            --bin codex-windows-sandbox-service \
+            --bin codex-command-runner
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release"
+          $output = "codex-helpers"
+
+          Write-Host "CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR"
+          Write-Host "Release directory = $release"
+
+          if (-not (Test-Path $release)) {
+            throw "Release directory does not exist: $release"
+          }
+
+          Get-ChildItem $release -Filter "*.exe" |
+            Select-Object Name, Length, LastWriteTime
+
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+
+          Copy-Item "$release\codex-windows-sandbox-setup.exe" "$output\codex-windows-sandbox-setup.exe"
+          Copy-Item "$release\codex-windows-sandbox-service.exe" "$output\codex-windows-sandbox-service.exe"
+          Copy-Item "$release\codex-command-runner.exe" "$output\codex-command-runner.exe"
+
+      - name: Upload helpers
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-helpers
+          path: codex-helpers
+
+
+  # =========================================
+  # Merge all binaries into one ZIP
+  # =========================================
+  package:
+    name: Package Codex
+    needs:
+      - build-primary
+      - build-helpers
+
+    runs-on: windows-2025
+
+    steps:
+      - name: Download primary
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-primary
+          path: codex
+
+      - name: Download helpers
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-helpers
+          path: codex
+
+      - name: Show files
+        shell: pwsh
+        run: |
+          Get-ChildItem codex | Format-Table Name, Length
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "codex\*" `
+            -DestinationPath "codex-windows-x64.zip"
+
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-windows-x64
+          path: codex-windows-x64.zip
