@@ -112,6 +112,7 @@ pub(crate) async fn handle_response_stream_error(
 
     if retry_state.retries < max_retries {
         retry_state.retries = retry_count;
+        let delay = Duration::from_secs(3);
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
         // In release builds, hide the first websocket retry notification to reduce noisy
