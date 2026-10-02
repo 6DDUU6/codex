@@ -294,12 +294,12 @@ impl App {
             self.chat_widget.add_info_message(
                 format!(
                     "The rename target disappeared. Unsubmitted title: {}",
-                    state.input
+                    state.input.text()
                 ),
                 /*hint*/ None,
             );
             state.rename_target = None;
-            state.input.clear();
+            state.input.set_text_clearing_elements("");
         }
         self.chat_widget
             .replace_bottom_pane_view_if_present(AGENTS_OVERVIEW_VIEW_ID, Box::new(view));
@@ -364,6 +364,11 @@ impl App {
             });
         }
 
+        self.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .vim_enabled = self.chat_widget.composer_is_vim_enabled();
         AgentsOverviewView::new(
             rows,
             selected_thread_id,
@@ -775,6 +780,9 @@ impl App {
                     .set_workspace_roots(self.config.permissions.workspace_roots().to_vec());
             }
             self.config = destination_config;
+            if is_new_session {
+                self.remember_launch_permissions();
+            }
             if !read_only {
                 let approval = self.config.permissions.approval_policy.value();
                 if self
@@ -985,7 +993,10 @@ impl App {
         }
         .to_path_buf();
         if let Some(draft) = startup_draft.as_deref_mut() {
-            draft.apply_config(&config);
+            draft.apply_settings(
+                &crate::local_settings::LocalSettings::from(&config),
+                config.cwd.as_path(),
+            );
         }
         let mut server_model_cleared = false;
         match StartupDraftPump::run_with_optional_draft(
