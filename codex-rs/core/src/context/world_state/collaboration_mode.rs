@@ -2,13 +2,16 @@ use super::PreviousSectionState;
 use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::ContextualUserFragment;
 use codex_prompts::ResolvedCollaborationModeMessages;
 use codex_prompts::ResolvedModelMessages;
 use codex_prompts::without_update_plan_instructions;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::COLLABORATION_MODE_CLOSE_TAG;
 use codex_protocol::protocol::COLLABORATION_MODE_OPEN_TAG;
 use serde::Deserialize;
@@ -134,14 +137,14 @@ impl WorldStateSection for CollaborationModeState {
             }
         };
         if unchanged {
-            return (Some(current), None);
+            return (Some(current), Vec::new());
         }
 
         (
             Some(current),
-            Some(Box::new(CollaborationModeInstructions {
+            vec![WorldStateUpdate::fragment(CollaborationModeInstructions {
                 instructions: self.instructions.clone().unwrap_or_default(),
-            })),
+            })],
         )
     }
 }
@@ -168,8 +171,8 @@ impl ContextualUserFragment for CollaborationModeInstructions {
         (COLLABORATION_MODE_OPEN_TAG, COLLABORATION_MODE_CLOSE_TAG)
     }
 
-    fn body(&self) -> String {
-        self.instructions.clone()
+    fn body(&self) -> ContentItem {
+        input_text(self.instructions.clone())
     }
 }
 

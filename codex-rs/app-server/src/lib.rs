@@ -53,6 +53,7 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
+use codex_app_server_transport::WebSocketCompression;
 use codex_app_server_transport::daemon_recovery_file_path;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
@@ -122,6 +123,8 @@ mod gateway_oauth_notifications;
 mod image_url;
 pub mod in_process;
 mod log_write_warning;
+#[cfg(unix)]
+mod managed_daemon;
 mod mcp_refresh;
 mod message_processor;
 mod model_catalog;
@@ -151,6 +154,7 @@ pub use crate::transport::AppServerTransport;
 pub use crate::transport::RemoteControlStartupMode;
 pub use crate::transport::app_server_control_socket_path;
 pub use crate::transport::take_remote_control_disabled_env;
+pub use crate::transport::verified_local_daemon_socket;
 
 const LOG_FORMAT_ENV_VAR: &str = "LOG_FORMAT";
 const OTEL_SERVICE_NAME: &str = "codex-app-server";
@@ -504,6 +508,10 @@ pub async fn run_main_with_transport_options(
 ) -> IoResult<AppServerExit> {
     #[cfg(target_os = "windows")]
     let _registered_core = codex_windows_sandbox::registered_core_requested();
+    let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
+        && runtime_options.managed_daemon;
+    #[cfg(unix)]
+    let nofile_limit_result = managed_daemon.then(managed_daemon::raise_nofile_limit);
     let loader_overrides = loader_overrides_with_test_user_config_file(
         loader_overrides,
         test_user_config_file_from_env(),
@@ -523,6 +531,7 @@ pub async fn run_main_with_transport_options(
         )
     })?;
     let codex_home = find_codex_home()?;
+    let startup_cwd = std::env::current_dir().ok();
     let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
@@ -538,8 +547,9 @@ pub async fn run_main_with_transport_options(
         Arc::new(NoopThreadConfigLoader),
     );
     let bootstrap_config = config_manager
-        .load_startup_config(/*fallback_cwd*/ None)
-        .await?;
+        .load_startup_config(startup_cwd.clone())
+        .await?
+        .config;
     let bootstrap_auth =
         AuthManager::shared_from_config(&bootstrap_config, /*enable_codex_api_key_env*/ false)
             .await
@@ -551,10 +561,7 @@ pub async fn run_main_with_transport_options(
     );
     let mut config_warnings = Vec::new();
     let mut plugin_startup_config = PluginStartupConfig::Current;
-    let config = match config_manager
-        .load_latest_config(/*fallback_cwd*/ None)
-        .await
-    {
+    let config = match config_manager.load_latest_config(startup_cwd.clone()).await {
         Ok(config) => config,
         Err(err) if is_unsupported_untrusted_approval_policy_error(&err) => {
             return Err(err);
@@ -575,6 +582,7 @@ pub async fn run_main_with_transport_options(
             })?
         }
     };
+    config.validate_windows_mxc_requirement()?;
     config.auth_config().validate()?;
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
@@ -686,9 +694,10 @@ pub async fn run_main_with_transport_options(
             range: None,
         });
     }
-    if let Some(warning) =
-        codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
-    {
+    if let Some(warning) = codex_core::config::system_bwrap_warning(
+        &config.permissions.effective_permission_profile(),
+        &config.cwd,
+    ) {
         config_warnings.push(ConfigWarningNotification {
             summary: warning,
             details: None,
@@ -746,6 +755,10 @@ pub async fn run_main_with_transport_options(
         .with(log_db_layer)
         .with(otel_layers)
         .try_init();
+    #[cfg(unix)]
+    if let Some(Err(err)) = nofile_limit_result {
+        warn!(%err, "failed to raise managed app-server file descriptor limit");
+    }
     for warning in &config_warnings {
         match &warning.details {
             Some(details) => error!("{} {}", warning.summary, details),
@@ -780,11 +793,17 @@ pub async fn run_main_with_transport_options(
     let remote_control_shutdown_token = transport_shutdown_token.child_token();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
+    let websocket_compression = if config
+        .features
+        .enabled(Feature::AppServerWebSocketCompression)
+    {
+        WebSocketCompression::Zstd
+    } else {
+        WebSocketCompression::Plain
+    };
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
     let graceful_signal_restart_enabled =
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
-    let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
-        && runtime_options.managed_daemon;
     let mut app_server_client_name_rx = None;
 
     match &transport {
@@ -812,6 +831,7 @@ pub async fn run_main_with_transport_options(
                 } else {
                     DaemonShutdownAccess::Disabled
                 },
+                websocket_compression,
             )
             .await?;
             transport_accept_handles.push(accept_handle);
@@ -822,6 +842,7 @@ pub async fn run_main_with_transport_options(
                 transport_event_tx.clone(),
                 transport_shutdown_token.clone(),
                 policy_from_settings(&auth)?,
+                websocket_compression,
             )
             .await?;
             transport_accept_handles.push(accept_handle);
@@ -965,15 +986,22 @@ pub async fn run_main_with_transport_options(
     });
 
     let recovery_file = daemon_recovery_file_path(&config.codex_home);
+    let daemon_settings_file = managed_daemon.then(|| {
+        config
+            .codex_home
+            .as_path()
+            .join("app-server-daemon/settings.json")
+    });
     let processor_handle = tokio::spawn({
         let auth_manager = Arc::clone(&auth_manager);
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
-        let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+        let mut processor = MessageProcessor::new(MessageProcessorArgs {
             outgoing: outgoing_message_sender,
             analytics_events_client,
             arg0_paths,
             config: Arc::new(config),
+            startup_cwd,
             config_manager,
             environment_manager,
             feedback: feedback.clone(),
@@ -994,7 +1022,9 @@ pub async fn run_main_with_transport_options(
                 PluginStartupTasks::Start
             )
             .then_some(plugin_startup_config),
-        }));
+        });
+        processor.remote_control_processor.daemon_settings_file = daemon_settings_file;
+        let processor = Arc::new(processor);
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
         let mut active_admissions_rx = processor.turn_admission.subscribe_active();

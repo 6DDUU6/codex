@@ -6,11 +6,16 @@ use super::PreviousSectionState;
 use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::agent::child_config::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use crate::agent::child_config::model_supports_multi_agent_backend;
 use crate::context::ContextualUserFragment;
 use crate::context::environment_context::push_xml_escaped_text;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ContentItemNamespace;
+use codex_protocol::models::input_text;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 
@@ -23,6 +28,7 @@ const OMITTED_NOTICE: &str = "Additional model choices omitted.\n";
 #[derive(Clone, Default)]
 pub(crate) struct ModelCatalogState {
     catalog: String,
+    namespace: Option<ContentItemNamespace>,
 }
 
 impl ModelCatalogState {
@@ -81,11 +87,23 @@ impl ModelCatalogState {
             catalog.push_str(&escaped);
             catalog.push('\n');
         }
-        Self { catalog }
+        Self {
+            catalog,
+            namespace: None,
+        }
+    }
+
+    pub(crate) fn with_namespace(mut self, namespace: Option<ContentItemNamespace>) -> Self {
+        self.namespace = namespace;
+        self
     }
 }
 
 impl ContextualUserFragment for ModelCatalogState {
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::tool(self.namespace.clone())
+    }
+
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind("multi_agent.model_catalog".to_string())
     }
@@ -102,12 +120,12 @@ impl ContextualUserFragment for ModelCatalogState {
         ("<model_catalog>", "</model_catalog>")
     }
 
-    fn body(&self) -> String {
-        if self.catalog.is_empty() {
+    fn body(&self) -> ContentItem {
+        input_text(if self.catalog.is_empty() {
             "\nThe previous spawn_agent model catalog no longer applies.\n".to_string()
         } else {
             format!("\n{}", self.catalog)
-        }
+        })
     }
 }
 
@@ -135,8 +153,11 @@ impl WorldStateSection for ModelCatalogState {
         if matches!(previous, PreviousSectionState::Known(previous) if previous == &current)
             || self.catalog.is_empty() && matches!(previous, PreviousSectionState::Absent)
         {
-            return (Some(current), None);
+            return (Some(current), Vec::new());
         }
-        (Some(current), Some(Box::new(self.clone())))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(self.clone())],
+        )
     }
 }

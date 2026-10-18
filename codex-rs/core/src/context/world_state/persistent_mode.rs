@@ -5,8 +5,11 @@ use super::PreviousSectionState;
 use super::SectionTransition;
 use super::WorldStateHash;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -36,8 +39,8 @@ impl ContextualUserFragment for PersistentModeState {
         ("<persistent_mode>", "</persistent_mode>")
     }
 
-    fn body(&self) -> String {
-        format!("\n{}\n", self.instructions)
+    fn body(&self) -> ContentItem {
+        input_text(format!("\n{}\n", self.instructions))
     }
 }
 
@@ -94,7 +97,7 @@ impl WorldStateSection for PersistentModeState {
                 .then(|| WorldStateHash::from_fragment(self)),
         };
         if matches!(previous, PreviousSectionState::Known(previous) if previous == &current) {
-            return (None, None);
+            return (None, Vec::new());
         }
         let previous_had_instructions = match previous {
             PreviousSectionState::Absent => false,
@@ -102,12 +105,15 @@ impl WorldStateSection for PersistentModeState {
             PreviousSectionState::Known(previous) => previous.instructions.is_some(),
         };
         let instructions = match (self.instructions.as_str(), previous_had_instructions) {
-            ("", false) => return (Some(current), None),
+            ("", false) => return (Some(current), Vec::new()),
             ("", true) => REMOVAL_NOTICE.to_string(),
             (instructions, true) => format!("{REPLACEMENT_NOTICE}\n\n{instructions}"),
             (instructions, false) => instructions.to_string(),
         };
-        (Some(current), Some(Box::new(Self { instructions })))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(Self { instructions })],
+        )
     }
 }
 

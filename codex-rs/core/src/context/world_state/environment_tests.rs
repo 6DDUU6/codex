@@ -1,10 +1,12 @@
 use super::super::PreviousSectionState;
 use super::super::test_support::render_section_cases;
 use super::*;
+use crate::context::world_state::test_support::FragmentSectionTestExt as _;
 use anyhow::Result;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -173,12 +175,16 @@ fn changing_primary_environment_updates_model_context_and_persisted_state() -> R
         .collect(),
         ..Default::default()
     };
-    let previous = before.render_diff(PreviousSectionState::Absent).0.unwrap();
+    let previous = before
+        .render_fragment_diff(PreviousSectionState::Absent)
+        .0
+        .unwrap();
     let rendered = after
-        .render_diff(PreviousSectionState::Known(&previous))
+        .render_fragment_diff(PreviousSectionState::Known(&previous))
         .1
         .expect("primary change should update the model")
-        .render();
+        .render()
+        .expect_text();
 
     assert_eq!(
         rendered,
@@ -232,14 +238,14 @@ fn legacy_single_environment_snapshot_does_not_change() -> Result<()> {
 
     assert!(
         environment
-            .render_diff(PreviousSectionState::Known(&legacy_snapshot))
+            .render_fragment_diff(PreviousSectionState::Known(&legacy_snapshot))
             .1
             .is_none()
     );
     assert_eq!(
         serde_json::to_value(
             environment
-                .render_diff(PreviousSectionState::Absent)
+                .render_fragment_diff(PreviousSectionState::Absent)
                 .0
                 .unwrap()
         )?["environments"]["local"],
@@ -288,12 +294,16 @@ fn crossing_single_environment_boundary_restates_current_environments() -> Resul
         };
 
         let expanded = multiple
-            .render_diff(PreviousSectionState::Known(
-                &single.render_diff(PreviousSectionState::Absent).0.unwrap(),
+            .render_fragment_diff(PreviousSectionState::Known(
+                &single
+                    .render_fragment_diff(PreviousSectionState::Absent)
+                    .0
+                    .unwrap(),
             ))
             .1
             .expect("adding an environment should update the model")
-            .render();
+            .render()
+            .expect_text();
         assert_eq!(
             expanded,
             format!(
@@ -302,15 +312,16 @@ fn crossing_single_environment_boundary_restates_current_environments() -> Resul
         );
 
         let reduced = single
-            .render_diff(PreviousSectionState::Known(
+            .render_fragment_diff(PreviousSectionState::Known(
                 &multiple
-                    .render_diff(PreviousSectionState::Absent)
+                    .render_fragment_diff(PreviousSectionState::Absent)
                     .0
                     .unwrap(),
             ))
             .1
             .expect("removing an environment should update the model")
-            .render();
+            .render()
+            .expect_text();
         assert_eq!(
             reduced,
             format!(
@@ -366,7 +377,7 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
         .collect(),
         ..Default::default()
     };
-    insta::assert_snapshot!(failed.body(), @r#"
+    insta::assert_snapshot!(failed.body().expect_text(), @r#"
 
       <environments>
         <environment id="remote">
@@ -378,8 +389,11 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
     "#);
     assert!(
         failed
-            .render_diff(PreviousSectionState::Known(
-                &failed.render_diff(PreviousSectionState::Absent).0.unwrap()
+            .render_fragment_diff(PreviousSectionState::Known(
+                &failed
+                    .render_fragment_diff(PreviousSectionState::Absent)
+                    .0
+                    .unwrap()
             ))
             .1
             .is_none()
@@ -394,13 +408,16 @@ fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()
         ..Default::default()
     };
     let update = recovered
-        .render_diff(PreviousSectionState::Known(
-            &failed.render_diff(PreviousSectionState::Absent).0.unwrap(),
+        .render_fragment_diff(PreviousSectionState::Known(
+            &failed
+                .render_fragment_diff(PreviousSectionState::Absent)
+                .0
+                .unwrap(),
         ))
         .1
         .expect("recovery must be visible to the model");
-    assert!(!update.body().contains("<error>"));
-    assert!(update.body().contains("<shell>bash</shell>"));
+    assert!(!update.body().expect_text().contains("<error>"));
+    assert!(update.body().expect_text().contains("<shell>bash</shell>"));
     Ok(())
 }
 
@@ -411,7 +428,9 @@ fn failure_context_limits_total_detail_bytes_at_utf8_boundaries() {
     let snapshot = TurnEnvironmentSnapshot {
         environments: (0..4)
             .map(|index| TurnEnvironmentState::Failed {
+                required_skills: Vec::new(),
                 selection: TurnEnvironmentSelection {
+                    selected_capability_roots: Default::default(),
                     environment_id: format!("remote-{index}"),
                     cwd: PathUri::parse("file:///workspace").unwrap(),
                     workspace_roots: Vec::new(),
