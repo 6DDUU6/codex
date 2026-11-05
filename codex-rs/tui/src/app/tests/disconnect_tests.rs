@@ -17,6 +17,12 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+fn normalize_reconnect_status(popup: &str) -> String {
+    let status =
+        regex_lite::Regex::new(r"(?m)^[•◦] (Reconnecting to server… )\([\dhms ]+\)").unwrap();
+    status.replace(popup, "• ${1}(<elapsed>)").into_owned()
+}
+
 #[tokio::test]
 async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()> {
     let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
@@ -127,7 +133,7 @@ async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()>
                     .unwrap()
                     .display_lines(/*width*/ 80)
             ),
-            render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            normalize_reconnect_status(&render_bottom_popup(&app.chat_widget, /*width*/ 80))
         )
     );
     let mut keymap = codex_config::types::TuiKeymap::default();
@@ -188,6 +194,19 @@ async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()>
                 ))
             )
             .await?,
+            AppRunControl::Exit(ExitReason::UserRequested)
+        ));
+    }
+    for command in ["/exit", "/quit"] {
+        app.chat_widget
+            .restore_user_message_to_composer(command.into());
+        app.handle_tui_event(&mut tui, &mut session, TuiEvent::Key(KeyCode::Enter.into()))
+            .await?;
+        let exit = std::iter::from_fn(|| events.try_recv().ok())
+            .find(|event| matches!(event, AppEvent::Exit(_)))
+            .expect("quit command should request exit");
+        assert!(matches!(
+            app.handle_event(&mut tui, &mut session, exit).await?,
             AppRunControl::Exit(ExitReason::UserRequested)
         ));
     }
@@ -462,10 +481,11 @@ async fn lost_initial_thread_reply_keeps_startup_draft_offline() -> Result<()> {
             )
             .await;
         }
+        let backend_id = session.backend_id();
         app.handle_event(
             &mut tui,
             &mut session,
-            AppEvent::StartupThreadStarted { result },
+            AppEvent::StartupThreadStarted { backend_id, result },
         )
         .await?;
         assert!(app.reconnect.offline);
@@ -577,14 +597,9 @@ async fn rejected_initial_thread_start_reconnects_and_submits_prompt_once() -> R
             TuiEvent::Paste("startup draft".into()),
         )
         .await?;
-        let reconnect_status =
-            regex_lite::Regex::new(r"^[•◦] (Reconnecting to server… )\([\dhms ]+\)")?;
         assert_snapshot!(
             "rejected_startup_reconnecting",
-            reconnect_status.replace(
-                &render_bottom_popup(&app.chat_widget, /*width*/ 80),
-                "• ${1}(<elapsed>)",
-            )
+            normalize_reconnect_status(&render_bottom_popup(&app.chat_widget, /*width*/ 80))
         );
 
         let mut launch_choices = crate::app_server_session::StartupLaunchChoices::default();

@@ -111,6 +111,7 @@ enum OrderedMcpOverlay {
 
 #[derive(Clone)]
 pub struct McpManager {
+    connection_pool: codex_mcp::McpConnectionPool,
     plugins_manager: Arc<PluginsManager>,
     extensions: Arc<ExtensionRegistry<Config>>,
     codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
@@ -135,6 +136,7 @@ impl McpManager {
         codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     ) -> Self {
         Self {
+            connection_pool: codex_mcp::McpConnectionPool::default(),
             plugins_manager,
             extensions,
             codex_apps_tools_cache,
@@ -144,12 +146,26 @@ impl McpManager {
         }
     }
 
+    pub(crate) fn for_plugins_manager(&self, plugins_manager: Arc<PluginsManager>) -> Self {
+        let mut manager = Self::new_with_extensions(
+            plugins_manager,
+            Arc::clone(&self.extensions),
+            ConnectorRuntimeManager::default(),
+        );
+        manager.connection_pool = self.connection_pool.clone();
+        manager
+    }
+
     pub fn codex_apps_tools_cache(&self) -> ConnectorRuntimeManager<ToolInfo> {
         self.codex_apps_tools_cache.clone()
     }
 
     pub fn tool_catalog_cache(&self) -> McpToolCatalogCache {
         self.tool_catalog_cache.clone()
+    }
+
+    pub(crate) fn connection_pool(&self) -> codex_mcp::McpConnectionPool {
+        self.connection_pool.clone()
     }
 
     pub(crate) fn shared_definitions(&self) -> &SharedMcpDefinitions {
