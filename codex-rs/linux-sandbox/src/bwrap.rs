@@ -45,7 +45,7 @@ use ignore::overrides::OverrideBuilder;
 ///
 /// These are intentionally system-level paths only (plus Nix store roots) so
 /// `include_platform_defaults` does not silently widen access to user data.
-const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
+pub(super) const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
     "/bin",
     "/sbin",
     "/usr",
@@ -107,11 +107,13 @@ pub(crate) enum BwrapNetworkMode {
     /// Bubblewrap enforces this by unsharing the network namespace. The
     /// proxy-routing bridge is established by the helper process after startup.
     ProxyOnly,
+    /// The transparent TCP setup already isolated this command's network namespace.
+    PreparedProxy,
 }
 
 impl BwrapNetworkMode {
     fn should_unshare_network(self) -> bool {
-        !matches!(self, Self::FullAccess)
+        matches!(self, Self::Isolated | Self::ProxyOnly)
     }
 }
 
@@ -482,6 +484,14 @@ fn create_filesystem_args(
     unreadable_roots.sort();
     unreadable_roots.dedup();
 
+    let ssh_drop_ins = Path::new("/etc/ssh/ssh_config.d");
+    let inherits_ssh_drop_ins = resolved.has_full_disk_read_access
+        || resolved.include_platform_defaults
+        || resolved
+            .readable_roots
+            .iter()
+            .any(|root| ssh_drop_ins.starts_with(root.as_path()));
+
     let mut args = if resolved.has_full_disk_read_access {
         // Read-only root, then mount a minimal device tree.
         // In bubblewrap (`bubblewrap.c`, `SETUP_MOUNT_DEV`), `--dev /dev`
@@ -752,6 +762,35 @@ fn create_filesystem_args(
     rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
     for unreadable_root in rootless_unreadable_roots {
         append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
+    }
+
+    // OpenSSH rejects host root-owned includes when root is unmapped. An empty
+    // directory makes its Include glob match nothing. Preserve explicit paths,
+    // and avoid targeting a symlink that could redirect the mask elsewhere.
+    if inherits_ssh_drop_ins
+        && !unreadable_roots
+            .iter()
+            .any(|path| ssh_drop_ins.starts_with(path))
+        && !allowed_write_paths
+            .iter()
+            .any(|path| ssh_drop_ins.starts_with(path) || path.starts_with(ssh_drop_ins))
+        && ssh_drop_ins.ancestors().all(|path| {
+            fs::symlink_metadata(path).is_ok_and(|m| {
+                m.is_dir() && (path == ssh_drop_ins || (m.uid() == 0 && m.mode() & 0o022 == 0))
+            })
+        })
+        && !file_system_sandbox_policy
+            .entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::Read)
+            .any(|entry| {
+                FileSystemSandboxPolicy::restricted(vec![entry.clone()])
+                    .get_readable_roots_with_cwd(cwd)
+                    .iter()
+                    .any(|path| path.as_path().starts_with(ssh_drop_ins))
+            })
+    {
+        append_empty_directory_args(&mut bwrap_args, ssh_drop_ins);
     }
 
     if options.mask_wslg_distro

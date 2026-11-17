@@ -8,7 +8,6 @@ use std::sync::atomic::AtomicBool;
 use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
-use crate::current_time::app_server_time_provider;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
@@ -52,6 +51,7 @@ use crate::request_processors::TurnRequestProcessor;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_processors::account_processor::handle_gcp_setup;
 use crate::request_processors::read_server_diagnostics;
+use crate::request_processors::thread_list_state::ThreadListState;
 use crate::request_serialization::QueuedInitializedRequest;
 use crate::request_serialization::RequestSerializationQueueKey;
 use crate::request_serialization::RequestSerializationQueues;
@@ -104,7 +104,6 @@ use codex_thread_store::LocalQueueStore;
 use codex_thread_store::QueueStore;
 use codex_thread_store::ThreadStoreError;
 use tokio::sync::Mutex;
-use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -417,11 +416,7 @@ impl MessageProcessor {
                     outgoing.clone(),
                     thread_state_manager.clone(),
                 )),
-                {
-                    let time_provider =
-                        app_server_time_provider(outgoing.clone(), thread_state_manager.clone());
-                    Some(time_provider)
-                },
+                None,
             );
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
@@ -457,7 +452,7 @@ impl MessageProcessor {
         let pending_thread_unloads = Arc::new(Mutex::new(HashMap::new()));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
-        let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
+        let thread_list_state_permit = Arc::new(ThreadListState::default());
         let app_list_shutdown_token = CancellationToken::new();
         let request_serialization_queues = RequestSerializationQueues::default();
         let config_processor = ConfigRequestProcessor::new(
@@ -484,7 +479,6 @@ impl MessageProcessor {
             Arc::clone(&model_catalog),
         );
         let apps_processor = AppsRequestProcessor::new(
-            auth_manager.clone(),
             Arc::clone(&thread_manager),
             outgoing.clone(),
             config_manager.clone(),
@@ -560,7 +554,7 @@ impl MessageProcessor {
             Arc::clone(&thread_list_state_permit),
         );
         let thread_processor = ThreadRequestProcessor::new(
-            auth_manager.clone(),
+            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             arg0_paths.clone(),
@@ -580,7 +574,6 @@ impl MessageProcessor {
             sample_responses,
         );
         let turn_processor = TurnRequestProcessor::new(
-            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             analytics_events_client.clone(),
@@ -593,7 +586,6 @@ impl MessageProcessor {
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
         );
         if let Some(startup_config) = plugin_startup_tasks {
-            // Keep plugin startup warmups aligned at app-server startup.
             let reload_config = match startup_config {
                 PluginStartupConfig::Current => {
                     plugin_config_reload::for_cwd(config_manager.clone(), config.cwd.clone())
@@ -608,7 +600,6 @@ impl MessageProcessor {
                 .plugins_manager()
                 .maybe_start_plugin_startup_tasks_for_config(
                     &config.plugins_config_input(),
-                    config.features.enabled(Feature::PluginDiscoveryPrefetch),
                     reload_config,
                     Some(on_effective_plugins_changed),
                     startup_warnings_tx,
@@ -1293,7 +1284,7 @@ impl MessageProcessor {
                 .clients_revoke(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ConfigRequirementsRead { params: _, .. } => self
+            ClientRequest::ConfigRequirementsRead { .. } => self
                 .config_processor
                 .config_requirements_read()
                 .await
@@ -1362,7 +1353,12 @@ impl MessageProcessor {
                 .model_provider_config_write(params)
                 .await
                 .map(|r| Some(r.into())),
-            ClientRequest::ModelProviderCapabilitiesRead { params: _, .. } => self
+            ClientRequest::ModelProviderDefaultSet { params, .. } => self
+                .config_processor
+                .model_provider_default_set(params)
+                .await
+                .map(Some),
+            ClientRequest::ModelProviderCapabilitiesRead { .. } => self
                 .config_processor
                 .model_provider_capabilities_read()
                 .await
@@ -1777,6 +1773,11 @@ impl MessageProcessor {
                     .thread_inject_items(&request_id, params)
                     .await
             }
+            ClientRequest::ThreadPrepareApprovedPlan { params, .. } => {
+                self.turn_processor
+                    .thread_prepare_approved_plan(&request_id, params)
+                    .await
+            }
             ClientRequest::TurnSteer { params, .. } => {
                 self.turn_processor.turn_steer(&request_id, params).await
             }
@@ -1819,7 +1820,10 @@ impl MessageProcessor {
             ClientRequest::ThreadTimelineList { params, .. } => {
                 self.thread_processor.thread_timeline_list(params).await
             }
-            ClientRequest::ThreadRealtimeListVoices { params: _, .. } => {
+            ClientRequest::ThreadRealtimeList { params, .. } => {
+                self.thread_processor.thread_realtime_list(params).await
+            }
+            ClientRequest::ThreadRealtimeListVoices { .. } => {
                 self.turn_processor.thread_realtime_list_voices().await
             }
             ClientRequest::ReviewStart { params, .. } => {
@@ -1893,12 +1897,13 @@ impl MessageProcessor {
                     .bedrock_check_gov_cloud_requirements()
                     .await
             }
-            ClientRequest::GatewayOAuthRead { .. } => {
-                Box::pin(self.account_processor.gateway_oauth_read())
-                    .await
-                    .map(|response| Some(response.into()))
-            }
-            ClientRequest::GatewayOAuthLogin { .. } => {
+            ClientRequest::GatewayOAuthRead { params, .. } => Box::pin(
+                self.account_processor
+                    .gateway_oauth_read(params.unwrap_or_default()),
+            )
+            .await
+            .map(|response| Some(response.into())),
+            ClientRequest::GatewayOAuthLogin { params, .. } => {
                 if session
                     .opted_out_notification_methods()
                     .contains("account/gatewayOAuth/changed")
@@ -1907,10 +1912,11 @@ impl MessageProcessor {
                         "Gateway login requires account/gatewayOAuth/changed notifications",
                     ))
                 } else {
-                    Box::pin(
-                        self.account_processor
-                            .gateway_oauth_login(connection_id, &session.rpc_gate),
-                    )
+                    Box::pin(self.account_processor.gateway_oauth_login(
+                        params.unwrap_or_default(),
+                        connection_id,
+                        &session.rpc_gate,
+                    ))
                     .await
                     .map(|response| Some(response.into()))
                 }
@@ -1944,6 +1950,12 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
+            ClientRequest::GetAccountSecuritySetup { .. } => Ok(Some(
+                self.account_processor
+                    .get_account_security_setup()
+                    .await
+                    .into(),
+            )),
             ClientRequest::GetAccountRateLimits { params, .. } => {
                 self.account_processor.get_account_rate_limits(params).await
             }

@@ -19,13 +19,17 @@
 //! Inline banners sit above the composer. Number shortcuts apply only to an empty, idle composer;
 //! drafts, paste bursts, and active dialogs keep their normal input routing.
 //! Owned transcripts separate activity from the transcript and reserve their shared hint row
-//! below activity and previews, above the composer.
+//! below activity and previews, above the composer. Disabling composer input dismisses transient
+//! searches and restores the draft they temporarily replaced.
 pub(crate) use chat_composer::CommandPopupPlacement;
 pub(crate) use chat_composer::ComposerRenderOptions;
 pub(crate) use chat_composer::TranscriptFooter;
+pub(crate) use chat_composer::composer_layout::FooterLayout;
 pub(crate) use composer_gap::ComposerGap;
 pub(crate) use footer::footer_hint_items_line;
 pub(crate) use footer::inset_footer_hint_area;
+pub(crate) use status_line::StatusLine;
+pub(crate) use status_line::StatusLineFocus;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -92,7 +96,7 @@ pub(crate) use multi_select_picker::MultiSelectPicker;
 mod question_tests;
 mod questions;
 mod request_user_input;
-pub(crate) mod status_line_content;
+mod status_line;
 mod status_line_setup;
 mod status_line_style;
 mod status_surface_preview;
@@ -119,11 +123,10 @@ pub(crate) use approval_overlay::format_requested_permissions_rule;
 pub(crate) use async_questions::AsyncQuestions;
 pub(crate) use async_questions::QuestionState;
 pub(crate) use async_questions::QuestionSubmission;
-pub(crate) use footer::footer_content;
 pub(crate) use mcp_server_elicitation::McpServerElicitationFormRequest;
 pub(crate) use mcp_server_elicitation::McpServerElicitationOverlay;
 pub(crate) use request_user_input::RequestUserInputOverlay;
-pub(crate) use status_line_style::STATUS_LINE_SEPARATOR;
+pub(crate) use status_line_style::StatusLineAccent;
 pub(crate) use status_line_style::status_line_from_segments;
 pub(crate) use voice_strip::VoiceStripPhase;
 pub(crate) use voice_strip::VoiceStripState;
@@ -199,10 +202,9 @@ mod feedback_view;
 mod hooks_browser_view;
 pub(crate) use feedback_view::FeedbackAudience;
 pub(crate) use feedback_view::feedback_classification;
-pub(crate) use feedback_view::feedback_disabled_params;
+pub(crate) use feedback_view::feedback_consent_params;
 pub(crate) use feedback_view::feedback_selection_params;
 pub(crate) use feedback_view::feedback_success_cell;
-pub(crate) use feedback_view::feedback_upload_consent_params;
 pub(crate) use skills_toggle_view::SkillsToggleItem;
 pub(crate) use skills_toggle_view::SkillsToggleView;
 pub(crate) use status_line_setup::StatusLineItem;
@@ -309,7 +311,7 @@ pub(crate) struct BottomPane {
     warnings_view: Option<warnings_view::WarningsView>,
     /// A keep press can close the viewer; its remaining repeats must not edit the draft.
     pub(crate) suppress_warning_keep_repeat: bool,
-    view_transition_key_guard: Option<crate::activation_key_guard::ActivationKeyGuard>,
+    pub(crate) view_transition_key_guard: Option<crate::activation_key_guard::ActivationKeyGuard>,
     pub(crate) questions: Option<Box<AsyncQuestions>>,
     delayed_approval_requests: VecDeque<DelayedApprovalRequest>,
     last_composer_activity_at: Option<Instant>,
@@ -850,12 +852,39 @@ impl BottomPane {
         self.push_view(Box::new(modal));
     }
 
+    fn is_composer_activity_key(&self, key: KeyEvent) -> bool {
+        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && (self.keymap.composer.undo.is_pressed(key)
+                || self.keymap.composer.redo.is_pressed(key))
+        {
+            return true;
+        }
+        matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && !key_hint::has_ctrl_or_alt(key.modifiers)
+            && matches!(
+                key.code,
+                KeyCode::Char(_)
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::Enter
+                    | KeyCode::Tab
+            )
+    }
+
     /// Preserve restricted drafts, allowing recovery commands only for connected unavailable threads.
     pub(crate) fn handle_restricted_key(
         &mut self,
         key: KeyEvent,
         mode: RestrictedInputMode,
     ) -> InputResult {
+        if mode == RestrictedInputMode::DraftHandoff {
+            let result = self.composer.handle_restricted_key(key, mode);
+            if self.is_composer_activity_key(key) {
+                self.record_composer_activity_at(Instant::now());
+            }
+            self.request_redraw();
+            return result;
+        }
         self.view_stack.clear();
         self.warnings_view = None;
         self.delayed_approval_requests.clear();
@@ -894,17 +923,7 @@ impl BottomPane {
                 view.observe_key_event_while_covered(key_event, routed_key);
             }
         }
-        let records_composer_activity =
-            matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                && !key_hint::has_ctrl_or_alt(key_event.modifiers)
-                && matches!(
-                    key_event.code,
-                    KeyCode::Char(_)
-                        | KeyCode::Backspace
-                        | KeyCode::Delete
-                        | KeyCode::Enter
-                        | KeyCode::Tab
-                );
+        let records_composer_activity = self.is_composer_activity_key(key_event);
         if self.warnings_active() {
             if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 self.record_composer_activity_at(Instant::now());
@@ -1211,6 +1230,10 @@ impl BottomPane {
         enabled: bool,
         placeholder: Option<String>,
     ) {
+        if !enabled {
+            self.composer.cancel_vim_search();
+            self.composer.cancel_history_search();
+        }
         self.composer.set_input_enabled(enabled, placeholder);
         self.request_redraw();
     }
@@ -1385,7 +1408,7 @@ impl BottomPane {
         self.status_widget().is_some()
     }
 
-    pub(crate) fn status_line_content(&self) -> Option<&footer_content::FooterContent> {
+    pub(crate) fn status_line_content(&self) -> Option<&StatusLine> {
         self.composer.status_line_content()
     }
 
@@ -1490,8 +1513,8 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub(crate) fn set_context_window_pending(&mut self, pending: bool) {
-        self.composer.set_context_window_pending(pending);
+    pub(crate) fn set_context_window_hidden(&mut self, hidden: bool) {
+        self.composer.set_context_window_hidden(hidden);
         self.request_redraw();
     }
 
@@ -1930,8 +1953,13 @@ impl BottomPane {
 
     /// Return true when no popups or modal views are active, regardless of task state.
     pub(crate) fn can_launch_external_editor(&self) -> bool {
+        self.completion_can_yield_focus() && !self.composer.popup_active()
+    }
+
+    /// A hidden completion popup can yield to another pane. Prompts and queries keep input.
+    pub(crate) fn completion_can_yield_focus(&self) -> bool {
         !self.has_active_view()
-            && !self.composer.popup_active()
+            && !self.composer.query_active()
             && !self.questions.as_ref().is_some_and(|q| q.expanded)
     }
 
@@ -2323,6 +2351,9 @@ impl BottomPane {
     /// Commit accepted typing before snapshotting the target of an asynchronous paste.
     pub(crate) fn prepare_composer_clipboard_paste(&mut self) {
         self.composer.flush_pending_paste_burst();
+        if !self.composer.is_vim_enabled() {
+            self.composer.finish_edit();
+        }
     }
 
     pub(crate) fn is_in_paste_burst(&self) -> bool {
@@ -2376,6 +2407,12 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    /// Settle typing before an accepted handoff image without starting shell mode.
+    pub(crate) fn settle_before_handoff_image(&mut self) {
+        self.composer
+            .flush_pending_input_with_shell_prefix(ShellPrefixHandling::Literal);
+    }
+
     pub(crate) fn attach_image(&mut self, path: PathBuf) {
         if !self.has_active_view() {
             self.composer.attach_image(path);
@@ -2423,9 +2460,10 @@ impl BottomPane {
 
     pub(crate) fn backdrop_with_options<'a>(
         &'a self,
-        options: ComposerRenderOptions<'a>,
+        mut options: ComposerRenderOptions<'a>,
     ) -> RenderableItem<'a> {
         let views = if self.centered_dialog().is_some() {
+            options.is_dialog_backdrop = true;
             &self.view_stack[..self.view_stack.len() - 1]
         } else {
             &self.view_stack
@@ -2576,6 +2614,7 @@ impl BottomPane {
                 && options.warning_count == 0
                 && options.footer.is_none()
                 && !options.separate_status_line
+                && !options.is_dialog_backdrop
                 && options.command_popup_placement == CommandPopupPlacement::AboveComposer
             {
                 RenderableItem::Borrowed(&self.composer)
@@ -2600,7 +2639,7 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub(crate) fn set_status_line(&mut self, status_line: Option<footer_content::FooterContent>) {
+    pub(crate) fn set_status_line(&mut self, status_line: Option<StatusLine>) {
         if self.composer.set_status_line(status_line) {
             self.request_redraw();
         }
@@ -2734,6 +2773,18 @@ mod tests {
 
     pub(super) fn test_pane(app_event_tx: AppEventSender) -> BottomPane {
         test_pane_with_disable_paste_burst(app_event_tx, /*disable_paste_burst*/ false)
+    }
+
+    #[test]
+    fn clipboard_image_undo_preserves_buffered_typing() {
+        let (tx, _) = unbounded_channel();
+        let mut pane = test_pane(AppEventSender::new(tx));
+        pane.composer.handle_key_event(KeyCode::Char('a').into());
+        pane.prepare_composer_clipboard_paste();
+        pane.attach_image(std::path::PathBuf::from("example.png"));
+        pane.composer.handle_key_event(KeyCode::F(7).into());
+        assert_eq!(pane.composer.current_text(), "a");
+        assert!(pane.composer.local_image_paths().is_empty());
     }
 
     fn test_pane_with_disable_paste_burst(
