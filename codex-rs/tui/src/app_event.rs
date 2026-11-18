@@ -367,6 +367,15 @@ pub(crate) enum AppEvent {
         notice: crate::security_setup::Notice,
     },
     OpenDaemonMenu,
+    RemoteControl(crate::app::remote_control::Action),
+    RemoteControlForBackend {
+        backend_id: crate::backend_id::BackendId,
+        action: crate::app::remote_control::Action,
+    },
+    RemoteControlFinished {
+        backend_id: crate::backend_id::BackendId,
+        result: crate::app::remote_control::Outcome,
+    },
     ConfirmDaemonRestart,
     RunDaemonRestart,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
@@ -1903,6 +1912,22 @@ pub(crate) enum AppEvent {
     },
     /// Dismiss the status-line setup UI without changing config.
     StatusLineSetupCancelled,
+    OpenStatuslinePicker(crate::key_hint::KeyBinding),
+    CloseStatuslinePicker(uuid::Uuid),
+    ChooseStatuslineProvider {
+        scan: uuid::Uuid,
+        id: Option<crate::statusline_provider::ProviderId>,
+        key: crate::key_hint::KeyBinding,
+    },
+    CreateCustomStatusline {
+        backend: Option<crate::backend_id::BackendId>,
+        thread_id: Option<ThreadId>,
+        key: crate::key_hint::KeyBinding,
+    },
+    StatuslinePicker {
+        scan: uuid::Uuid,
+        updates: Vec<crate::statusline_provider::discovery::DiscoveryUpdate>,
+    },
 
     /// Apply a user-confirmed terminal-title item ordering/selection.
     TerminalTitleSetup {

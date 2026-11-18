@@ -64,6 +64,11 @@ impl App {
                 AppEvent::OpenDaemonMenu
                     | AppEvent::OpenWarnings
                     | AppEvent::StatusLineSetup { .. }
+                    | AppEvent::OpenStatuslinePicker(_)
+                    | AppEvent::CloseStatuslinePicker(_)
+                    | AppEvent::ChooseStatuslineProvider { .. }
+                    | AppEvent::CreateCustomStatusline { .. }
+                    | AppEvent::StatuslinePicker { .. }
                     | AppEvent::StatusLineSetupCancelled
                     | AppEvent::TerminalTitleSetup { .. }
                     | AppEvent::TerminalTitleSetupPreview { .. }
@@ -224,6 +229,7 @@ impl App {
         };
         match event {
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
+            AppEvent::RemoteControl(_) | AppEvent::RemoteControlForBackend { .. } | AppEvent::RemoteControlFinished { .. } => {}
             AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
             AppEvent::RunDaemonRestart => {
                 if self.chat_widget.remote_connection.as_ref().is_some_and(|connection| connection.is_managed_daemon)
@@ -476,8 +482,43 @@ impl App {
                     }
                 }
             }
+            AppEvent::OpenStatuslinePicker(key) => {
+                if self.chat_widget.active_view_is(crate::bottom_pane::StatusLineSetupView::VIEW_ID) {
+                    self.open_statusline_picker(app_server);
+                    self.chat_widget.suppress_current_view_key_until_release(
+                        key,
+                        Instant::now(),
+                        crate::activation_key_guard::ActivationKeySuppression::ViewTransition,
+                    );
+                }
+            }
+            AppEvent::CloseStatuslinePicker(scan) => {
+                if self.statusline_picker.as_ref().is_some_and(|picker| picker.id == scan) {
+                    self.statusline_picker = None;
+                }
+            }
+            AppEvent::ChooseStatuslineProvider { scan, id, key } => self.choose_statusline_provider(scan, id, key, app_server).await,
+            AppEvent::CreateCustomStatusline { backend, thread_id, key } => {
+                if app_server.thread_params_mode() != crate::ThreadParamsMode::Cloud
+                    && self.config.features.enabled(Feature::TuiExtensionsStatusLine)
+                    && self.chat_widget.active_view_is(crate::bottom_pane::StatusLineSetupView::VIEW_ID)
+                    && self.chat_widget.model_catalog().backend == backend
+                    && backend.is_none_or(|id| id == app_server.backend_id())
+                    && self.current_displayed_thread_id() == thread_id
+                {
+                    crate::boxed_future!(self.start_statusline_authoring(tui, app_server)).await;
+                    if self.current_displayed_thread_id() != thread_id {
+                        self.chat_widget.suppress_current_view_key_until_release(
+                            key,
+                            Instant::now(),
+                            crate::activation_key_guard::ActivationKeySuppression::PressOnlyFallback,
+                        );
+                    }
+                }
+            }
+            AppEvent::StatuslinePicker { scan, updates } => self.finish_statusline_discovery(scan, updates, app_server),
             AppEvent::StatuslineRead(event) => {
-                self.chat_widget.handle_statusline_read(event, app_server);
+                self.chat_widget.handle_statusline_read(event, app_server, &self.statusline_metrics, &self.config);
             }
             AppEvent::TaskToolsAvailable { thread_id } => {
                 app_server.remember_task_tool_thread(thread_id);
@@ -2074,6 +2115,7 @@ impl App {
                 self.skill_load_warnings.startup_complete = true;
             }
             AppEvent::StartFileSearch(query) => {
+                app_server.task_search.cancel();
                 self.file_search.on_user_query(query.clone());
                 if let Some(thread_id) = self.active_thread_id
                     && app_server.task_tools_available(thread_id)
@@ -2089,12 +2131,12 @@ impl App {
                                 .map(std::path::Path::to_path_buf)
                         })
                         .unwrap_or_else(|| self.config.cwd.to_path_buf());
-                    crate::task_mentions::spawn_search(
-                        app_server.request_handle(),
+                    let handle = app_server.request_handle();
+                    app_server.task_search.spawn(
+                        handle,
                         query,
                         thread_id,
                         cwd,
-                        app_server.task_search_generation(),
                         self.app_event_tx.clone(),
                     );
                 }

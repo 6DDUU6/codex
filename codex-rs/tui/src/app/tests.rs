@@ -9176,6 +9176,8 @@ async fn make_test_app() -> Box<App> {
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
     Box::new(App {
+        statusline_picker: None,
+        statusline_metrics: Default::default(),
         provider_writes: HashMap::new(),
         feature_write_lock: Arc::default(),
         config_notification_test_generation: 0,
@@ -9246,6 +9248,7 @@ async fn make_test_app() -> Box<App> {
         daemon_cli_executable: None,
         pending_update_action: None,
         daemon_restart: None,
+        remote_control_pending: false,
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
@@ -9320,6 +9323,8 @@ pub(super) async fn make_test_app_with_channels() -> (
 
     (
         Box::new(App {
+            statusline_picker: None,
+            statusline_metrics: Default::default(),
             provider_writes: HashMap::new(),
             feature_write_lock: Arc::default(),
             config_notification_test_generation: 0,
@@ -9390,6 +9395,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             daemon_cli_executable: None,
             pending_update_action: None,
             daemon_restart: None,
+            remote_control_pending: false,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
